@@ -1,30 +1,18 @@
-#Include the library files
 from machine import Pin
-import socket
-import struct
 import time
-from time import sleep
-from machine import WDT
+import asyncio
 import bluetooth
 from bluetooth import BLE, FLAG_READ, FLAG_WRITE, FLAG_NOTIFY, FLAG_INDICATE
 from ble_simple_peripheral import BLESimplePeripheral
-import rp2
 
+# Constants
 _360_SERIAL_NUMBER = '_360_sn.txt'
+CAMERA_STATUS = 'BLE_WAIT_FOR_CONNECTION'
 
+# Hardware
+led = Pin('LED', Pin.OUT)
 shutter_gpio = Pin(19, Pin.IN, Pin.PULL_UP)
-shutter_gpio_debounce_time=0
-shutter_is_pressed = False
 wake_gpio = Pin(20, Pin.IN, Pin.PULL_UP)
-wake_gpio_debounce_time=0
-wake_button_is_pressed = False
-wake_up_event_triggered = False
-
-'''
-_IRQ_CENTRAL_CONNECT = const(1)
-_IRQ_CENTRAL_DISCONNECT = const(2)
-_IRQ_GATTS_WRITE = const(3)
-'''
 
 # UUID Definitions
 SERVICE_UUID = bluetooth.UUID(0xce80)
@@ -125,156 +113,181 @@ _360_GPS_REMOTE_SECONDARY_SERVICE = (
 
 SERVICES = (_360_GPS_REMOTE_SERVICE, _360_GPS_REMOTE_SECONDARY_SERVICE,)
 
-manuf_data = bytearray(26)
+# BLE Manager Class
+class BLEManager:
+    def __init__(self):
+        self.ble = bluetooth.BLE()
+        self.ble_360_Sp = None
+        self.manuf_data = bytearray(26)
+        self.wake_up_event_triggered = False
+        self.shutter_gpio_debounce_time = 0
+        self.wake_gpio_debounce_time = 0
 
-ble = BLE()
-_360_ble_Sp = None
+        self.setup_ble()
+        self.setup_interrupts()
 
-def setup(ble):
-    global manuf_data
-    print("Starting BLE work!")
+    def setup_ble(self):
+        global CAMERA_STATUS
+        """Initialize BLE setup."""
+        print("Starting BLE work!")
+        self.ble_360_Sp = BLESimplePeripheral(self.ble, name="Insta360 GPS Remote", 
+            _BLE_SERVICE=SERVICES, 
+            _BLE_SERVICE_UUID=_360_GPS_REMOTE_UUID)
+        self.ble_360_Sp.on_write(self.on_rx)
+        CAMERA_STATUS = 'BLE_WAIT_FOR_CONNECTION'
 
-    # Create an instance of the BLESimplePeripheral class with the BLE object
-    _360_ble_Sp = BLESimplePeripheral(ble, 
-        name="Insta360 GPS Remote", 
-        _BLE_SERVICE=SERVICES, 
-        _BLE_SERVICE_UUID=_360_GPS_REMOTE_UUID)
+    def setup_interrupts(self):
+        """Attach hardware interrupt handlers."""
+        shutter_gpio.irq(trigger=Pin.IRQ_FALLING, handler=self.shutter_callback)
+        wake_gpio.irq(trigger=Pin.IRQ_FALLING, handler=self.wake_button_callback)
 
-    return _360_ble_Sp
+    def on_rx(self, data):
+        """Handle received BLE data."""
+        global CAMERA_STATUS
+        print("Data received:", data)
+        if len(data) > 5 and data[:5] == b'\xfe\xef\xfe\x07\x00':
+            self.manuf_data[14:20] = data[-6:]
+            print(self.manuf_data[14:20])
 
-def on_rx(data):
-    global manuf_data
-    print("Data received: ", data)  # Print the received data
-    '''
-    New connection 64
-    Data received:  b'\xfe\xef\xfe\x02\x00\x05\x01(\x17\x01`'
-    Data received:  b'\xfe\xef\xfe\x05\x00\x01\x01'
-    Data received:  b'\xfe\xef\xfe\x07\x00\x06 8ABCDE '
-    Data received:  b'\xfe\xef\xfe\x02\x80\x05\x01T\x00\nP'
-    Data received:  b'\xfe\xef\xfe\x0f\x00\x00'
-    Data received:  b'\xfe\xef\xfe\x02\x80\x05\x01T\x00\nP'
-    Data received:  b'\xfe\xef\xfe\x02\x80\x05\x01T\x00\nP'
-    '''
-    if len(data) > 5:
-        if data[0:5] == b'\xfe\xef\xfe\x07\x00':
-            manuf_data[14:20] = data[-6:]
-            print(manuf_data[14:20])
             try:
                 with open(_360_SERIAL_NUMBER, 'rb') as fp:
                     sn = fp.read()
-                    if sn != manuf_data[14:20]:
-                        fp.seek(0)
-                        fp.write(manuf_data[14:20])
-                    fp.close()
-            except Exception as e:
+                    if sn != self.manuf_data[14:20]:
+                        with open(_360_SERIAL_NUMBER, 'wb') as fp_write:
+                            fp_write.write(self.manuf_data[14:20])
+            except Exception:
                 with open(_360_SERIAL_NUMBER, 'wb+') as fp:
-                    fp.write(manuf_data[14:20])
-                    fp.close()
+                    fp.write(self.manuf_data[14:20])
 
-def screen_toggle():
-    data_8 = bytearray(30)
-    data_8[:9] = b'\xfc\xef\xfe\x86\x00\x03\x01\x00\x00'
-    ble_360_Sp.send(data_8)
+            if CAMERA_STATUS != 'BLE_CONNECTED':
+                CAMERA_STATUS = 'BLE_CONNECTED'
+        elif len(data) == 8 and data[0:8] == b'\xfe\xef\xfe\x55\x00\x01\x00\x01':
+            if CAMERA_STATUS != 'CUSTOM_EVENT':
+                CAMERA_STATUS = 'CUSTOM_EVENT'
+        elif len(data) >= 8 and data[0:8] == b'\xfe\xef\xfe\x10\x81\x0c\x01\x1c':
+            print('foundmsg')
+            if CAMERA_STATUS != 'BLE_CONNECTED':
+                CAMERA_STATUS = 'BLE_CONNECTED'
 
-def power_off():
-    data_8 = bytearray(30)
-    data_8[:9] = b'\xfc\xef\xfe\x86\x00\x03\x01\x00\x03'
-    ble_360_Sp.send(data_8)
+    def shutter_callback(self, pin):
+        """Shutter button interrupt handler."""
+        if (time.ticks_ms() - self.shutter_gpio_debounce_time) > 500:
+            data_8 = bytearray(30)
+            data_8[:9] = b'\xfc\xef\xfe\x86\x00\x03\x01\x02\x00'
+            self.ble_360_Sp.send(data_8)
 
-def mode_button():
-    data_8 = bytearray(30)
-    data_8[:9] = b'\xfc\xef\xfe\x86\x00\x03\x01\x01\x00'
-    ble_360_Sp.send(data_8)
+            self.shutter_gpio_debounce_time = time.ticks_ms()
+            print('Shutter button pressed')
 
-'''
-def shutter_button():
-    data_8 = bytearray(30)
-    data_8[:9] = b'\xfc\xef\xfe\x86\x00\x03\x01\x02\x00'
-    ble_360_Sp.send(data_8)
-'''
+    def wake_button_callback(self, pin):
+        """Wake button interrupt handler."""
+        if (time.ticks_ms() - self.wake_gpio_debounce_time) > 500 and not self.wake_up_event_triggered:
+            self.wake_gpio_debounce_time = time.ticks_ms()
 
-def shutter_callback(pin):
-    global shutter_gpio_debounce_time
-    if (time.ticks_ms()-shutter_gpio_debounce_time) > 500:
-        data_8 = bytearray(30)
-        data_8[:9] = b'\xfc\xef\xfe\x86\x00\x03\x01\x02\x00'
-        ble_360_Sp.send(data_8)
+            if not self.ble_360_Sp.is_connected():
+                self.manuf_data[0] = 0x4c;
+                self.manuf_data[1] = 0x00;
+                self.manuf_data[2] = 0x02;
+                self.manuf_data[3] = 0x15;
+                self.manuf_data[4] = 0x09;
+                self.manuf_data[5] = 0x4f;
+                self.manuf_data[6] = 0x52;
+                self.manuf_data[7] = 0x42;
+                self.manuf_data[8] = 0x49;
+                self.manuf_data[9] = 0x54;
+                self.manuf_data[10] = 0x09;
+                self.manuf_data[11] = 0xff;
+                self.manuf_data[12] = 0x0f;
+                self.manuf_data[13] = 0x00;
 
-        shutter_gpio_debounce_time=time.ticks_ms()
-        print('shutter button is pressed')
+                # /* */
+                self.manuf_data[20] = 0x00;
+                self.manuf_data[21] = 0x00;
+                self.manuf_data[22] = 0x00;
+                self.manuf_data[23] = 0x00;
+                self.manuf_data[24] = 0xe4;
+                self.manuf_data[25] = 0x01;
 
-def wake_button_callback(pin):
-    global wake_gpio_debounce_time, manuf_data, wake_up_event_triggered
-    if (time.ticks_ms()-wake_gpio_debounce_time) > 500 and wake_up_event_triggered == False:
-        wake_gpio_debounce_time=time.ticks_ms()
+                try:
+                    with open(_360_SERIAL_NUMBER, 'rb') as fp:
+                        sn = fp.read()
+                        fp.close()
+                        self.manuf_data[14:20] = sn
+                except Exception as e:
+                    print(e)
 
-        if ble_360_Sp.is_connected() == False:
-            # /* set the manufacturing data for wake-up packet */
-            manuf_data[0] = 0x4c;
-            manuf_data[1] = 0x00;
-            manuf_data[2] = 0x02;
-            manuf_data[3] = 0x15;
-            manuf_data[4] = 0x09;
-            manuf_data[5] = 0x4f;
-            manuf_data[6] = 0x52;
-            manuf_data[7] = 0x42;
-            manuf_data[8] = 0x49;
-            manuf_data[9] = 0x54;
-            manuf_data[10] = 0x09;
-            manuf_data[11] = 0xff;
-            manuf_data[12] = 0x0f;
-            manuf_data[13] = 0x00;
+                _adv_buffer = b'\x01\x1a\x1b\xff' + self.manuf_data  # Add Header (0x02, 0x01, 0x1a), Length of Manufacturer Data (0x1b), Manufacturer Specific Data Type (0xFF)
+                print(_adv_buffer)
+                self.ble.gap_advertise(100000, adv_data=_adv_buffer)
+                print('Wake button pressed')
+                self.wake_up_event_triggered = True
 
-            # /* */
-            manuf_data[20] = 0x00;
-            manuf_data[21] = 0x00;
-            manuf_data[22] = 0x00;
-            manuf_data[23] = 0x00;
-            manuf_data[24] = 0xe4;
-            manuf_data[25] = 0x01;
+                asyncio.create_task(self.reinitialize_ble())
 
-            try:
-                with open(_360_SERIAL_NUMBER, 'rb') as fp:
-                    sn = fp.read()
-                    fp.close()
-                    manuf_data[14:20] = sn
-            except Exception as e:
-                pass
-            #manuf_data[14:20] = b'\x38\x55\x45\x46\x45\x48' #8ABCDE, This is the model number got from the text in Camera->Device Info.
+    async def reinitialize_ble(self):
+        """Handle BLE reconnection asynchronously."""
+        await asyncio.sleep(5)
+        self.wake_up_event_triggered = False
+        self.setup_ble()
 
-            _adv_buffer = b'\x01\x1a\x1b\xff' + manuf_data  # Add Header (0x02, 0x01, 0x1a), Length of Manufacturer Data (0x1b), Manufacturer Specific Data Type (0xFF)
-            print(_adv_buffer)
-            ble_360_Sp._ble.gap_advertise(100000, adv_data=_adv_buffer)
-            print('wake button is pressed')
-            wake_up_event_triggered = True
+    async def manage_events(self):
+        """Manage LED blinking based on BLE state."""
+        global CAMERA_STATUS
+        while True:
+            if not self.ble_360_Sp.is_connected():
+                CAMERA_STATUS = 'BLE_WAIT_FOR_CONNECTION'
+            await asyncio.sleep(1)  # Check event change every second
+        
+# LED Blinking Manager
+class LEDManager:
+    def __init__(self):
+        self.led = Pin('LED', Pin.OUT)
+        self.stop_event = asyncio.Event()
 
-if __name__ == '__main__':
+    async def blink_led(self, interval):
+        """Blink LED asynchronously at a given interval."""
+        self.stop_event.clear()
+        while not self.stop_event.is_set():
+            if interval != 0:
+                self.led.on()
+                await asyncio.sleep(interval)
+                self.led.off()
+                await asyncio.sleep(interval)
+            else:
+                self.led.on()
+                await asyncio.sleep(1)
 
-    led = machine.Pin('LED', machine.Pin.OUT)
-    led.on()
-    sleep(1)
-    led.off()
+    async def manage_events(self):
+        """Manage LED blinking based on BLE state."""
+        global CAMERA_STATUS
+        event = None
+        while True:
+            if event != CAMERA_STATUS:
+                event = CAMERA_STATUS
+                self.stop_event.set()
+                await asyncio.sleep(0.1)  # Allow previous task to stop
+                self.stop_event.clear()
+                print(event)
+                if event == "BLE_CONNECTED":
+                    asyncio.create_task(self.blink_led(0.5))  # 1 sec interval
+                elif event == "BLE_WAIT_FOR_CONNECTION":
+                    asyncio.create_task(self.blink_led(3))  # 2 sec interval
+                elif event == "CUSTOM_EVENT":
+                    asyncio.create_task(self.blink_led(0))  # 500ms interval
 
-    machine.Pin(23, machine.Pin.OUT).high() #turn on wifi module
+            await asyncio.sleep(1)  # Check event change every second
 
-    ble = bluetooth.BLE()
-    ble_360_Sp = setup(ble)
-    ble_360_Sp.on_write(on_rx)  # Set the callback function for data reception
 
-    shutter_gpio.irq(trigger=Pin.IRQ_FALLING, handler=shutter_callback)
-    wake_gpio.irq(trigger=Pin.IRQ_FALLING, handler=wake_button_callback)
+# Main asyncio loop
+async def main():
+    ble_manager = BLEManager()
+    led_manager = LEDManager()
+
+    asyncio.create_task(led_manager.manage_events())  # Start LED manager
+    asyncio.create_task(ble_manager.manage_events())  # Start BLE manager
 
     while True:
-        sleep(1)
-        if wake_up_event_triggered == True:
-            end = time.time() + 5
-            now = time.time()
-            while end > now:
-                now = time.time()
+        await asyncio.sleep(2)  # Keep the event loop running
 
-            wake_up_event_triggered = False
-            #ble_360_Sp.disconnect()
-            #ble_360_Sp._advertise()
-            ble_360_Sp = setup(ble)
-            ble_360_Sp.on_write(on_rx)
-        print('no action, waiting')
+if __name__ == '__main__':
+    asyncio.run(main())  # Run the asyncio event loop
