@@ -15,10 +15,13 @@ R-Pi Pico W
                          +----+         +---+ 
 ```
 ## Parts
-R-Pi Pico: https://www.pishop.us/product/raspberry-pi-pico-w/
-Battery: model 602248 (620mAh), size: 22.5 mm x 50mm https://www.amazon.com/dp/B095VVR4LB?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&th=1 
-Charging board: https://tinyurl.com/46xmff7v 
-10mm x 2mm Mini Toggle Switches
+* R-Pi Pico: https://www.pishop.us/product/raspberry-pi-pico-w/
+
+* Battery: model 602248 (620mAh), size: 22.5 mm x 50mm https://www.amazon.com/dp/B095VVR4LB?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1&th=1 
+
+* Charging board: https://tinyurl.com/46xmff7v 
+
+* 10mm x 2mm Mini Toggle Switches
 
 There's also a case for the R-Pi Pico W, 600mA battery, charging pad, and buttons. The shell can attach
 to any ski pole with 18 mm in diameter.
