@@ -161,11 +161,10 @@ class BLEManager:
 
             if CAMERA_STATUS != 'BLE_CONNECTED':
                 CAMERA_STATUS = 'BLE_CONNECTED'
-        elif len(data) == 8 and data[0:8] == b'\xfe\xef\xfe\x55\x00\x01\x00\x01':
+        elif len(data) == 8 and data[0:7] == b'\xfe\xef\xfe\x55\x00\x01\x00':
             if CAMERA_STATUS != 'CUSTOM_EVENT':
                 CAMERA_STATUS = 'CUSTOM_EVENT'
         elif len(data) >= 8 and data[0:8] == b'\xfe\xef\xfe\x10\x81\x0c\x01\x1c':
-            print('foundmsg')
             if CAMERA_STATUS != 'BLE_CONNECTED':
                 CAMERA_STATUS = 'BLE_CONNECTED'
 
@@ -235,7 +234,8 @@ class BLEManager:
         global CAMERA_STATUS
         while True:
             if not self.ble_360_Sp.is_connected():
-                CAMERA_STATUS = 'BLE_WAIT_FOR_CONNECTION'
+                if CAMERA_STATUS != 'BLE_WAIT_FOR_CONNECTION':
+                    CAMERA_STATUS = 'BLE_WAIT_FOR_CONNECTION'
             await asyncio.sleep(1)  # Check event change every second
         
 # LED Blinking Manager
@@ -248,14 +248,10 @@ class LEDManager:
         """Blink LED asynchronously at a given interval."""
         self.stop_event.clear()
         while not self.stop_event.is_set():
-            if interval != 0:
-                self.led.on()
-                await asyncio.sleep(interval)
-                self.led.off()
-                await asyncio.sleep(interval)
-            else:
-                self.led.on()
-                await asyncio.sleep(1)
+            self.led.on()
+            await asyncio.sleep(interval)
+            self.led.off()
+            await asyncio.sleep(interval)
 
     async def manage_events(self):
         """Manage LED blinking based on BLE state."""
@@ -265,15 +261,15 @@ class LEDManager:
             if event != CAMERA_STATUS:
                 event = CAMERA_STATUS
                 self.stop_event.set()
-                await asyncio.sleep(0.1)  # Allow previous task to stop
+                await asyncio.sleep(3)  # Allow previous task to stop
                 self.stop_event.clear()
                 print(event)
                 if event == "BLE_CONNECTED":
-                    asyncio.create_task(self.blink_led(0.5))  # 1 sec interval
+                    asyncio.create_task(self.blink_led(0.5))  # 500 ms interval, total 1 second
                 elif event == "BLE_WAIT_FOR_CONNECTION":
-                    asyncio.create_task(self.blink_led(3))  # 2 sec interval
+                    asyncio.create_task(self.blink_led(1.5))  # 1.5 sec interval, total 3 seconds
                 elif event == "CUSTOM_EVENT":
-                    asyncio.create_task(self.blink_led(0))  # 500ms interval
+                    self.led.on()
 
             await asyncio.sleep(1)  # Check event change every second
 
